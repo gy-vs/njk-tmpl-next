@@ -369,6 +369,63 @@
                 [nodes.TemplateData, 'empty']]]]]);
     });
 
+    it('should parse break and continue tags inside loops', function() {
+      isAST(parser.parse('{% for x in [1, 2] %}{% break %}{% continue %}{% endfor %}'),
+        [nodes.Root,
+          [nodes.For,
+            [nodes.Array,
+              [nodes.Literal, 1],
+              [nodes.Literal, 2]],
+            [nodes.Symbol, 'x'],
+            [nodes.NodeList,
+              [nodes.Break],
+              [nodes.Continue]]]]);
+
+      isAST(parser.parse('{% asyncEach x in [1, 2] %}{% break %}{% endeach %}'),
+        [nodes.Root,
+          [nodes.AsyncEach,
+            [nodes.Array,
+              [nodes.Literal, 1],
+              [nodes.Literal, 2]],
+            [nodes.Symbol, 'x'],
+            [nodes.NodeList,
+              [nodes.Break]]]]);
+    });
+
+    it('should fail when break or continue is used outside of a loop', function() {
+      expect(function() {
+        parser.parse('{% break %}');
+      }).to.throwException(/can only be used inside a loop/);
+
+      expect(function() {
+        parser.parse('{% continue %}');
+      }).to.throwException(/can only be used inside a loop/);
+
+      expect(function() {
+        parser.parse('{% for x in [1] %}{% endfor %}{% break %}');
+      }).to.throwException(/can only be used inside a loop/);
+    });
+
+    it('should fail when break or continue is used inside asyncAll', function() {
+      expect(function() {
+        parser.parse('{% asyncAll x in [1] %}{% break %}{% endall %}');
+      }).to.throwException(/not supported inside asyncAll/);
+
+      expect(function() {
+        parser.parse('{% asyncAll x in [1] %}{% continue %}{% endall %}');
+      }).to.throwException(/not supported inside asyncAll/);
+    });
+
+    it('should fail when break crosses a macro or block boundary', function() {
+      expect(function() {
+        parser.parse('{% for x in [1] %}{% macro m() %}{% break %}{% endmacro %}{% endfor %}');
+      }).to.throwException(/can only be used inside a loop/);
+
+      expect(function() {
+        parser.parse('{% for x in [1] %}{% block b %}{% continue %}{% endblock %}{% endfor %}');
+      }).to.throwException(/can only be used inside a loop/);
+    });
+
     it('should parse filters', function() {
       isAST(parser.parse('{{ foo | bar }}'),
         [nodes.Root,

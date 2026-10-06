@@ -528,6 +528,156 @@
     runLoopTests('asyncEach');
     runLoopTests('asyncAll');
 
+    describe('the break and continue tags', function() {
+      it('should stop a for loop with {% break %}', function() {
+        equal('{% for i in [1, 2, 3] %}{% if i == 2 %}{% break %}{% endif %}{{ i }}{% endfor %}',
+          '1');
+      });
+      it('should skip an iteration of a for loop with {% continue %}', function() {
+        equal('{% for i in [1, 2, 3] %}{% if i == 2 %}{% continue %}{% endif %}{{ i }}{% endfor %}',
+          '13');
+      });
+      it('should support break and continue in key-value loops over objects', function() {
+        equal('{% for k, v in { one: 1, two: 2, three: 3 } %}' +
+          '{% if k == "two" %}{% break %}{% endif %}{{ k }}:{{ v }};{% endfor %}',
+          'one:1;');
+        equal('{% for k, v in { one: 1, two: 2, three: 3 } %}' +
+          '{% if k == "two" %}{% continue %}{% endif %}{{ k }}{% endfor %}',
+          'onethree');
+      });
+      it('should support break and continue when looping over a Map', function() {
+        if (typeof Map === 'undefined') {
+          this.skip();
+        } else {
+          equal('{% for k, v in map %}{% if k == 2 %}{% break %}{% endif %}[{{ k }},{{ v }}]{% endfor %}',
+            { map: new Map([[1, 2], [2, 3], [3, 4]]) },
+            '[1,2]');
+          equal('{% for k, v in map %}{% if k == 2 %}{% continue %}{% endif %}[{{ k }},{{ v }}]{% endfor %}',
+            { map: new Map([[1, 2], [2, 3], [3, 4]]) },
+            '[1,2][3,4]');
+        }
+      });
+      it('should only break out of the innermost loop', function() {
+        equal('{% for i in [1, 2] %}' +
+          '{% for j in [1, 2, 3] %}{% if j == 2 %}{% break %}{% endif %}{{ i }}-{{ j }};{% endfor %}' +
+          '{% endfor %}',
+          '1-1;2-1;');
+      });
+      it('should only skip an iteration of the innermost loop', function() {
+        equal('{% for i in [1, 2] %}' +
+          '{% for j in [1, 2] %}{% if j == 1 %}{% continue %}{% endif %}{{ i }}-{{ j }};{% endfor %}' +
+          '{% endfor %}',
+          '1-2;2-2;');
+      });
+      it('should not execute the {% else %} block of a loop exited with {% break %}', function() {
+        equal('{% for i in [1, 2, 3] %}{% break %}{% else %}empty{% endfor %}', '');
+      });
+      it('should execute the {% else %} block when the loop never iterates', function() {
+        equal('{% for i in [] %}{% break %}{% else %}empty{% endfor %}', 'empty');
+      });
+      it('should not execute the {% else %} block when the loop completes without break', function() {
+        equal('{% for i in [1, 2, 3] %}{% if i == 9 %}{% break %}{% endif %}{{ i }}{% else %}empty{% endfor %}',
+          '123');
+      });
+      it('should keep the loop variable working alongside break', function() {
+        equal('{% for i in [7, 3, 6] %}{{ loop.index }}:{{ i }};{% if loop.last %}{% break %}{% endif %}{% endfor %}',
+          '1:7;2:3;3:6;');
+      });
+      it('should stop an asyncEach loop with {% break %}', function() {
+        equal('{% asyncEach i in [1, 2, 3] %}{% if i == 2 %}{% break %}{% endif %}{{ i }}{% endeach %}',
+          '1');
+      });
+      it('should skip an iteration of an asyncEach loop with {% continue %}', function() {
+        equal('{% asyncEach i in [1, 2, 3] %}{% if i == 2 %}{% continue %}{% endif %}{{ i }}{% endeach %}',
+          '13');
+      });
+      it('should support break in asyncEach key-value loops over objects', function() {
+        equal('{% asyncEach k, v in { one: 1, two: 2, three: 3 } %}' +
+          '{% if k == "two" %}{% break %}{% endif %}{{ k }}{% endeach %}',
+          'one');
+      });
+      it('should not execute the {% else %} block of an asyncEach loop exited with {% break %}', function() {
+        equal('{% asyncEach i in [1, 2, 3] %}{% break %}{% else %}empty{% endeach %}', '');
+        equal('{% asyncEach i in [] %}{% break %}{% else %}empty{% endeach %}', 'empty');
+      });
+      it('should break out of a for loop that uses async filters', function(done) {
+        var opts = {
+          asyncFilters: {
+            identity: function(val, cb) {
+              cb(null, val);
+            }
+          }
+        };
+
+        render('{% for i in [1, 2, 3] %}{% if i == 2 %}{% break %}{% endif %}{{ i | identity }}{% endfor %}',
+          {},
+          opts,
+          function(err, res) {
+            expect(res).to.be('1');
+          });
+
+        render('{% for i in [1, 2, 3] %}{% if i == 2 %}{% continue %}{% endif %}{{ i | identity }}{% endfor %}',
+          {},
+          opts,
+          function(err, res) {
+            expect(res).to.be('13');
+          });
+
+        render('{% asyncEach i in [1, 2, 3] %}{{ i | identity }}{% if i == 2 %}{% break %}{% endif %}{% endeach %}',
+          {},
+          opts,
+          function(err, res) {
+            expect(res).to.be('12');
+          });
+
+        finish(done);
+      });
+      it('should error at compile time when break is used inside asyncAll', function() {
+        expect(function() {
+          render('{% asyncAll i in [1, 2, 3] %}{% break %}{% endall %}');
+        }).to.throwException(/break %} is not supported inside asyncAll/);
+      });
+      it('should error at compile time when continue is used inside asyncAll', function() {
+        expect(function() {
+          render('{% asyncAll i in [1, 2, 3] %}{% continue %}{% endall %}');
+        }).to.throwException(/continue %} is not supported inside asyncAll/);
+      });
+      it('should allow break in a for loop nested inside asyncAll', function() {
+        equal('{% asyncAll i in [1, 2] %}' +
+          '{% for j in [1, 2, 3] %}{% if j == 2 %}{% break %}{% endif %}{{ i }}-{{ j }};{% endfor %}' +
+          '{% endall %}',
+          '1-1;2-1;');
+      });
+      it('should error at compile time when break is used outside of a loop', function() {
+        expect(function() {
+          render('{% break %}');
+        }).to.throwException(/break %} can only be used inside a loop/);
+      });
+      it('should error at compile time when continue is used outside of a loop', function() {
+        expect(function() {
+          render('{% for i in [1] %}{% endfor %}{% continue %}');
+        }).to.throwException(/continue %} can only be used inside a loop/);
+      });
+      it('should report the line number when break is used outside of a loop', function(done) {
+        var tmpl = new Template('{% for i in [1, 2] %}{{ i }}\n{% endfor %}\n{% break %}', new Environment([]));
+        tmpl.render({}, function(err, res) {
+          expect(res).to.be(undefined);
+          expect(err.toString()).to.contain('[Line 3, Column 4]');
+          expect(err.toString()).to.contain('{% break %} can only be used inside a loop');
+          done();
+        });
+      });
+      it('should error when break is used in a macro defined inside a loop', function() {
+        expect(function() {
+          render('{% for i in [1] %}{% macro m() %}{% break %}{% endmacro %}{% endfor %}');
+        }).to.throwException(/break %} can only be used inside a loop/);
+      });
+      it('should still support break inside a loop defined in a macro', function() {
+        equal('{% macro m() %}{% for i in [1, 2, 3] %}{% if i == 2 %}{% break %}{% endif %}{{ i }}{% endfor %}{% endmacro %}{{ m() }}',
+          '1');
+      });
+    });
+
     it('should allow overriding var with none inside nested scope', function(done) {
       equal(
         '{% set var = "foo" %}' +

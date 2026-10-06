@@ -12,6 +12,10 @@ class Parser extends Obj {
     this.breakOnBlocks = null;
     this.dropLeadingWhitespace = false;
 
+    // Stack of the loop nodes (For/AsyncEach/AsyncAll) currently
+    // being parsed, used to validate {% break %}/{% continue %}
+    this.loopStack = [];
+
     this.extensions = [];
   }
 
@@ -191,7 +195,9 @@ class Parser extends Obj {
     node.arr = this.parseExpression();
     this.advanceAfterBlockEnd(forTok.value);
 
+    this.loopStack.push(node);
     node.body = this.parseUntilBlocks(endBlock, 'else');
+    this.loopStack.pop();
 
     if (this.skipSymbol('else')) {
       this.advanceAfterBlockEnd('else');
@@ -201,6 +207,42 @@ class Parser extends Obj {
     this.advanceAfterBlockEnd();
 
     return node;
+  }
+
+  parseLoopControl() {
+    const tok = this.nextToken();
+    const tag = tok.value;
+    const innerLoop = this.loopStack[this.loopStack.length - 1];
+
+    if (!innerLoop) {
+      this.fail(`{% ${tag} %} can only be used inside a loop`,
+        tok.lineno,
+        tok.colno);
+    }
+
+    if (innerLoop instanceof nodes.AsyncAll) {
+      this.fail(`{% ${tag} %} is not supported inside asyncAll loops`,
+        tok.lineno,
+        tok.colno);
+    }
+
+    this.advanceAfterBlockEnd(tag);
+
+    const NodeType = (tag === 'break') ? nodes.Break : nodes.Continue;
+    return new NodeType(tok.lineno, tok.colno);
+  }
+
+  // Macro, block, call, set and filter bodies are compiled into
+  // separate functions, so a loop (and its break/continue) cannot
+  // span across them. Parse such bodies with a fresh loop stack.
+  parseFunctionBody(...blockNames) {
+    const parentLoops = this.loopStack;
+    this.loopStack = [];
+
+    const body = this.parseUntilBlocks(...blockNames);
+
+    this.loopStack = parentLoops;
+    return body;
   }
 
   parseMacro() {
@@ -214,7 +256,7 @@ class Parser extends Obj {
     const node = new nodes.Macro(macroTok.lineno, macroTok.colno, name, args);
 
     this.advanceAfterBlockEnd(macroTok.value);
-    node.body = this.parseUntilBlocks('endmacro');
+    node.body = this.parseFunctionBody('endmacro');
     this.advanceAfterBlockEnd();
 
     return node;
@@ -232,7 +274,7 @@ class Parser extends Obj {
     const macroCall = this.parsePrimary();
 
     this.advanceAfterBlockEnd(callTok.value);
-    const body = this.parseUntilBlocks('endcall');
+    const body = this.parseFunctionBody('endcall');
     this.advanceAfterBlockEnd();
 
     const callerName = new nodes.Symbol(callTok.lineno,
@@ -398,7 +440,7 @@ class Parser extends Obj {
 
     this.advanceAfterBlockEnd(tag.value);
 
-    node.body = this.parseUntilBlocks('endblock');
+    node.body = this.parseFunctionBody('endblock');
     this.skipSymbol('endblock');
     this.skipSymbol(node.name.value);
 
@@ -511,7 +553,7 @@ class Parser extends Obj {
         node.body = new nodes.Capture(
           tag.lineno,
           tag.colno,
-          this.parseUntilBlocks('endset')
+          this.parseFunctionBody('endset')
         );
         node.value = null;
         this.advanceAfterBlockEnd();
@@ -617,6 +659,9 @@ class Parser extends Obj {
       case 'asyncEach':
       case 'asyncAll':
         return this.parseFor();
+      case 'break':
+      case 'continue':
+        return this.parseLoopControl();
       case 'block':
         return this.parseBlock();
       case 'extends':
@@ -1118,7 +1163,7 @@ class Parser extends Obj {
     const body = new nodes.Capture(
       name.lineno,
       name.colno,
-      this.parseUntilBlocks('endfilter')
+      this.parseFunctionBody('endfilter')
     );
     this.advanceAfterBlockEnd();
 

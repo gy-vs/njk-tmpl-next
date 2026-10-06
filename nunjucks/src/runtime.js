@@ -376,5 +376,6 @@ module.exports = {
   asyncEach: asyncEach,
   asyncAll: asyncAll,
   inOperator: lib.inOperator,
-  fromIterator: fromIterator
+  fromIterator: fromIterator,
+  loopBreak: lib.loopBreak
 };

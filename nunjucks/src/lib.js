@@ -303,13 +303,19 @@ function map(obj, func) {
 
 exports.map = map;
 
+// Sentinel passed to the `next` callback of asyncIter/asyncFor to
+// stop an async loop immediately. Generated code emits this for the
+// {% break %} tag inside asyncEach loops.
+const loopBreak = {};
+exports.loopBreak = loopBreak;
+
 function asyncIter(arr, iter, cb) {
   let i = -1;
 
-  function next() {
+  function next(stop) {
     i++;
 
-    if (i < arr.length) {
+    if (stop !== loopBreak && i < arr.length) {
       iter(arr[i], i, next, cb);
     } else {
       cb();
@@ -326,11 +332,11 @@ function asyncFor(obj, iter, cb) {
   const len = keys.length;
   let i = -1;
 
-  function next() {
+  function next(stop) {
     i++;
     const k = keys[i];
 
-    if (i < len) {
+    if (stop !== loopBreak && i < len) {
       iter(k, obj[k], i, len, next);
     } else {
       cb();

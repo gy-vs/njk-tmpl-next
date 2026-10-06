@@ -20,6 +20,27 @@ const compareOps = {
   '>=': '>='
 };
 
+// Whether the node contains a break/continue anywhere. Unlike
+// findAll, this also descends into plain arrays (e.g. Switch cases).
+function usesLoopControl(node) {
+  if (!node) {
+    return false;
+  }
+  if (node instanceof nodes.Break || node instanceof nodes.Continue) {
+    return true;
+  }
+  if (Array.isArray(node)) {
+    return node.some(usesLoopControl);
+  }
+  if (node instanceof nodes.NodeList) {
+    return usesLoopControl(node.children);
+  }
+  if (node instanceof nodes.Node) {
+    return node.fields.some((field) => usesLoopControl(node[field]));
+  }
+  return false;
+}
+
 class Compiler extends Obj {
   init(templateName, throwOnUndefined) {
     this.templateName = templateName;
@@ -28,6 +49,9 @@ class Compiler extends Obj {
     this.buffer = null;
     this.bufferStack = [];
     this._scopeClosers = '';
+    // Loops currently being compiled, innermost last. Used to
+    // compile break/continue for the right kind of loop.
+    this._loopStack = [];
     this.inBlock = false;
     this.throwOnUndefined = throwOnUndefined;
   }
@@ -657,6 +681,12 @@ class Compiler extends Obj {
     const arr = this._tmpid();
     frame = frame.push();
 
+    // If the body uses break/continue, give the loop a label so they
+    // keep targeting it even from inside a switch statement
+    const loopLabel = usesLoopControl(node.body) ? this._tmpid() : null;
+    const label = loopLabel ? loopLabel + ': ' : '';
+    this._loopStack.push({async: false, label: loopLabel});
+
     this._emitLine('frame = frame.push();');
 
     this._emit(`var ${arr} = `);
@@ -676,7 +706,7 @@ class Compiler extends Obj {
       // we are optimizing for speed over size.
       this._emitLine(`if(runtime.isArray(${arr})) {`);
       this._emitLine(`var ${len} = ${arr}.length;`);
-      this._emitLine(`for(${i}=0; ${i} < ${arr}.length; ${i}++) {`);
+      this._emitLine(`${label}for(${i}=0; ${i} < ${arr}.length; ${i}++) {`);
 
       // Bind each declared var
       node.name.children.forEach((child, u) => {
@@ -702,7 +732,7 @@ class Compiler extends Obj {
 
       this._emitLine(`${i} = -1;`);
       this._emitLine(`var ${len} = runtime.keys(${arr}).length;`);
-      this._emitLine(`for(var ${k} in ${arr}) {`);
+      this._emitLine(`${label}for(var ${k} in ${arr}) {`);
       this._emitLine(`${i}++;`);
       this._emitLine(`var ${v} = ${arr}[${k}];`);
       this._emitLine(`frame.set("${key.value}", ${k});`);
@@ -721,7 +751,7 @@ class Compiler extends Obj {
       frame.set(node.name.value, v);
 
       this._emitLine(`var ${len} = ${arr}.length;`);
-      this._emitLine(`for(var ${i}=0; ${i} < ${arr}.length; ${i}++) {`);
+      this._emitLine(`${label}for(var ${i}=0; ${i} < ${arr}.length; ${i}++) {`);
       this._emitLine(`var ${v} = ${arr}[${i}];`);
       this._emitLine(`frame.set("${node.name.value}", ${v});`);
 
@@ -735,6 +765,8 @@ class Compiler extends Obj {
     }
 
     this._emitLine('}');
+    this._loopStack.pop();
+
     if (node.else_) {
       this._emitLine('if (!' + len + ') {');
       this.compile(node.else_, frame);
@@ -785,6 +817,7 @@ class Compiler extends Obj {
 
     this._emitLoopBindings(node, arr, i, len);
 
+    this._loopStack.push({async: true});
     this._withScopedSyntax(() => {
       let buf;
       if (parallel) {
@@ -798,6 +831,7 @@ class Compiler extends Obj {
         this._popBuffer();
       }
     });
+    this._loopStack.pop();
 
     const output = this._tmpid();
     this._emitLine('}, ' + this._makeCallback(output));
@@ -822,6 +856,42 @@ class Compiler extends Obj {
 
   compileAsyncAll(node, frame) {
     this._compileAsyncLoop(node, frame, true);
+  }
+
+  compileBreak(node) {
+    const loop = this._loopStack[this._loopStack.length - 1];
+
+    if (!loop) {
+      this.fail('compileBreak: {% break %} outside of a loop',
+        node.lineno,
+        node.colno);
+    }
+
+    if (loop.async) {
+      // Tell the async iterator to finish and skip the rest of the body
+      this._emitLine('next(runtime.loopBreak);');
+      this._emitLine('return;');
+    } else {
+      this._emitLine('break' + (loop.label ? ' ' + loop.label : '') + ';');
+    }
+  }
+
+  compileContinue(node) {
+    const loop = this._loopStack[this._loopStack.length - 1];
+
+    if (!loop) {
+      this.fail('compileContinue: {% continue %} outside of a loop',
+        node.lineno,
+        node.colno);
+    }
+
+    if (loop.async) {
+      // Skip the rest of the body and advance to the next iteration
+      this._emitLine('next();');
+      this._emitLine('return;');
+    } else {
+      this._emitLine('continue' + (loop.label ? ' ' + loop.label : '') + ';');
+    }
   }
 
   _compileMacro(node, frame) {
