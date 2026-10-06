@@ -521,12 +521,213 @@
               'empty');
           }
         });
+
+        if (block === 'for' || block === 'asyncEach') {
+          it('should support {% break %}', function() {
+            equal(
+              '{% ' + block + ' i in [1, 2, 3] %}' +
+              '{% if i == 2 %}{% break %}{% endif %}{{ i }}{% ' + end + ' %}',
+              '1');
+          });
+
+          it('should support {% continue %}', function() {
+            equal(
+              '{% ' + block + ' i in [1, 2, 3] %}' +
+              '{% if i == 2 %}{% continue %}{% endif %}{{ i }}{% ' + end + ' %}',
+              '13');
+          });
+
+          it('should support {% break %} when looping over key-values', function() {
+            equal(
+              '{% ' + block + ' k, v in items %}' +
+              '{% if k == "bar" %}{% break %}{% endif %}{{ k }}{{ v }}{% ' + end + ' %}',
+              { items: { foo: 1, bar: 2, baz: 3 } },
+              'foo1');
+          });
+
+          it('should support {% continue %} when looping over key-values', function() {
+            equal(
+              '{% ' + block + ' k, v in items %}' +
+              '{% if k == "bar" %}{% continue %}{% endif %}{{ k }}{{ v }}{% ' + end + ' %}',
+              { items: { foo: 1, bar: 2, baz: 3 } },
+              'foo1baz3');
+          });
+
+          it('should only affect the innermost loop with {% break %}', function() {
+            equal(
+              '{% ' + block + ' i in [1, 2, 3] %}' +
+              '{% ' + block + ' j in [10, 11] %}' +
+              '{% if j == 11 %}{% break %}{% endif %}{{ i }}{{ j }};' +
+              '{% ' + end + ' %}{% ' + end + ' %}',
+              '110;210;310;');
+          });
+
+          it('should not run {% else %} after {% break %}', function() {
+            equal(
+              '{% ' + block + ' i in [1, 2, 3] %}' +
+              '{% if i == 2 %}{% break %}{% endif %}{{ i }}' +
+              '{% else %}empty{% ' + end + ' %}',
+              '1');
+          });
+
+          it('should still run {% else %} on an empty loop with {% break %}', function() {
+            equal(
+              '{% ' + block + ' i in [] %}{% break %}{{ i }}' +
+              '{% else %}empty{% ' + end + ' %}',
+              'empty');
+          });
+        }
       });
     }
 
     runLoopTests('for');
     runLoopTests('asyncEach');
     runLoopTests('asyncAll');
+
+    it('should reject {% break %} and {% continue %} in asyncAll', function() {
+      function renderBlock(tag) {
+        return function() {
+          new Template(
+            '{% asyncAll i in [1, 2, 3] %}{% ' + tag + ' %}{% endall %}')
+            .render();
+        };
+      }
+
+      expect(renderBlock('break')).to.throwException(
+        /'break' tag is not supported inside asyncAll loops/);
+      expect(renderBlock('continue')).to.throwException(
+        /'continue' tag is not supported inside asyncAll loops/);
+    });
+
+    it('should allow {% break %} in an inner asyncEach inside asyncAll', function(done) {
+      render(
+        '{% asyncAll row in rows %}' +
+        '{% asyncEach i in row %}{% if i == 2 %}{% break %}{% endif %}{{ i }} ' +
+        '{% endeach %}|{% endall %}',
+        { rows: [[1, 2, 3], [4, 5]] },
+        function(err, res) {
+          expect(err).to.be(null);
+          expect(res).to.be('1 |4 5 |');
+          done();
+        });
+    });
+
+    it('should reject {% break %} and {% continue %} outside a loop at compile time',
+      function() {
+        function renderBlock(tag) {
+          return function() {
+            new Template('{% ' + tag + ' %}').render();
+          };
+        }
+
+        expect(renderBlock('break')).to.throwException(
+          /'break' tag must be inside a for loop/);
+        expect(renderBlock('continue')).to.throwException(
+          /'continue' tag must be inside a for loop/);
+      });
+
+    it('should report the line number of a {% break %} outside a loop', function(done) {
+      var tmplStr = [
+        'hello',
+        '{% break %}',
+      ].join('\n');
+      var tmpl = new Template(tmplStr, new Environment([], { dev: true }),
+        'break-error.njk');
+
+      tmpl.render({}, function(err) {
+        expect(err.toString()).to.contain('[Line 2');
+        done();
+      });
+    });
+
+    it('should reject {% break %} inside a macro defined in a loop', function() {
+      function renderIt() {
+        new Template(
+          '{% for i in [1, 2] %}' +
+          '{% macro m() %}{% break %}{% endmacro %}{{ m() }}{{ i }}' +
+          '{% endfor %}').render();
+      }
+
+      expect(renderIt).to.throwException(
+        /'break' tag must be inside a for loop/);
+    });
+
+    it('should support {% break %} and {% continue %} with async filters in a for',
+      function(done) {
+        var opts = {
+          asyncFilters: {
+            double: function(val, cb) {
+              setImmediate(function() { cb(null, val * 10); });
+            },
+            equalsTwo: function(val, cb) {
+              setImmediate(function() { cb(null, val === 2); });
+            }
+          }
+        };
+
+        render('{% for i in [1, 2, 3] %}{{ i | double }}' +
+          '{% if i == 2 %}{% break %}{% endif %}{% endfor %}',
+        {}, opts,
+        function(err, res) {
+          expect(err).to.be(null);
+          expect(res).to.be('1020');
+        });
+
+        render('{% for i in [1, 2, 3] %}{{ i | double }}' +
+          '{% if i == 2 %}{% continue %}{% endif %}.{% endfor %}',
+        {}, opts,
+        function(err, res) {
+          expect(err).to.be(null);
+          expect(res).to.be('10.2030.');
+        });
+
+        render('{% for i in [1, 2, 3] %}' +
+          '{% if i | equalsTwo %}{% break %}{% endif %}{{ i }}{% endfor %}',
+        {}, opts,
+        function(err, res) {
+          expect(err).to.be(null);
+          expect(res).to.be('1');
+        });
+
+        render('{% for i in [1, 2, 3] %}' +
+          '{% if i | equalsTwo %}{% continue %}{% endif %}' +
+          '{{ i | double }}#{% endfor %}',
+        {}, opts,
+        function(err, res) {
+          expect(err).to.be(null);
+          expect(res).to.be('10#30#');
+        });
+
+        finish(done);
+      });
+
+    it('should support {% break %} with async filters in asyncEach', function(done) {
+      var opts = {
+        asyncFilters: {
+          double: function(val, cb) {
+            setImmediate(function() { cb(null, val * 10); });
+          }
+        }
+      };
+
+      render('{% asyncEach i in [1, 2, 3] %}{{ i | double }}' +
+        '{% if i == 2 %}{% break %}{% endif %}{% endeach %}',
+      {}, opts,
+      function(err, res) {
+        expect(err).to.be(null);
+        expect(res).to.be('1020');
+      });
+
+      render('{% asyncEach i in [1, 2, 3] %}' +
+        '{% if i == 2 %}{% continue %}{% endif %}{{ i | double }};{% endeach %}',
+      {}, opts,
+      function(err, res) {
+        expect(err).to.be(null);
+        expect(res).to.be('10;30;');
+      });
+
+      finish(done);
+    });
 
     it('should allow overriding var with none inside nested scope', function(done) {
       equal(

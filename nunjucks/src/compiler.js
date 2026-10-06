@@ -30,6 +30,17 @@ class Compiler extends Obj {
     this._scopeClosers = '';
     this.inBlock = false;
     this.throwOnUndefined = throwOnUndefined;
+    // Stack of loops currently being compiled, used to validate and
+    // compile {% break %} and {% continue %} tags. Each entry tracks
+    // the kind of loop ('for', 'asyncEach' or 'asyncAll'), the
+    // generated index variable (for continue in async loops) and the
+    // depth of JavaScript function boundaries enclosing it.
+    this.loopStack = [];
+    // Number of real JavaScript function bodies (macros, captured
+    // blocks, etc.) currently being compiled. break/continue cannot
+    // cross these. Async CPS wrappers are not counted because the
+    // tags are compiled to work inside them.
+    this.funcDepth = 0;
   }
 
   fail(msg, lineno, colno) {
@@ -107,6 +118,51 @@ class Compiler extends Obj {
 
     this._closeScopeLevels();
     this._scopeClosers = _scopeClosers;
+  }
+
+  // Compile a node (or a function emitting code) inside a new
+  // JavaScript function body, such as a macro or captured block.
+  // {% break %} and {% continue %} are not allowed inside these
+  // because they would not be able to affect any enclosing loop.
+  _withFunctionBoundary(func) {
+    this.funcDepth++;
+    const prevLoopStack = this.loopStack;
+    this.loopStack = [];
+    try {
+      func.call(this);
+    } finally {
+      this.loopStack = prevLoopStack;
+      this.funcDepth--;
+    }
+  }
+
+  _enterLoop(kind, indexId, breakId, guardId) {
+    this.loopStack.push({
+      kind: kind,
+      indexId: indexId,
+      breakId: breakId,
+      guardId: guardId,
+      funcDepth: this.funcDepth
+    });
+  }
+
+  _leaveLoop() {
+    return this.loopStack.pop();
+  }
+
+  // Return the innermost asyncEach loop at the current JavaScript
+  // function depth, or null when not compiling an async iteration.
+  _currentAsyncLoop() {
+    for (let i = this.loopStack.length - 1; i >= 0; i--) {
+      const entry = this.loopStack[i];
+      if (entry.funcDepth !== this.funcDepth) {
+        break;
+      }
+      if (entry.kind === 'asyncEach') {
+        return entry;
+      }
+    }
+    return null;
   }
 
   _makeCallback(res) {
@@ -237,9 +293,11 @@ class Compiler extends Obj {
           this._emitLine('if(!cb) { cb = function(err) { if(err) { throw err; }}}');
           const id = this._pushBuffer();
 
-          this._withScopedSyntax(() => {
-            this.compile(arg, frame);
-            this._emitLine(`cb(null, ${id});`);
+          this._withFunctionBoundary(() => {
+            this._withScopedSyntax(() => {
+              this.compile(arg, frame);
+              this._emitLine(`cb(null, ${id});`);
+            });
           });
 
           this._popBuffer();
@@ -509,9 +567,20 @@ class Compiler extends Obj {
 
     frame.set(symbol, symbol);
 
+    const loop = this._currentAsyncLoop();
+
     this._emit('env.getFilter("' + name.value + '").call(context, ');
     this._compileAggregate(node.args, frame);
     this._emitLine(', ' + this._makeCallback(symbol));
+
+    if (loop) {
+      // First statement of this callback (after the error check from
+      // _makeCallback): if break/continue fired in a sibling node
+      // compiled into the same callback (or a nested one that already
+      // returned up to here), bail out of the current iteration
+      // instead of running the rest of the body.
+      this._emitLine(`if(${loop.guardId}) { return; }`);
+    }
 
     this._addScopeLevel();
   }
@@ -625,8 +694,20 @@ class Compiler extends Obj {
   }
 
   compileIfAsync(node, frame) {
+    // The innermost asyncEach loop (if any) supplies the per-iteration
+    // guard used by break/continue inside asynchronous callbacks.
+    const loop = this._currentAsyncLoop();
+
     this._emit('(function(cb) {');
     this.compileIf(node, frame, true);
+
+    if (loop) {
+      // When break/continue was requested inside the if body, return
+      // from this wrapper instead of invoking the continuation (which
+      // runs the rest of the iteration).
+      this._emitLine(`if(${loop.guardId}) { return; }`);
+    }
+
     this._emit('})(' + this._makeCallback());
     this._addScopeLevel();
   }
@@ -647,6 +728,71 @@ class Compiler extends Obj {
     });
   }
 
+  _validateLoopControl(node, tagName) {
+    // Find the innermost loop that was entered in the same JavaScript
+    // function scope as the tag.
+    let loop = null;
+    for (let i = this.loopStack.length - 1; i >= 0; i--) {
+      if (this.loopStack[i].funcDepth === this.funcDepth) {
+        loop = this.loopStack[i];
+        break;
+      }
+    }
+
+    if (!loop) {
+      this.fail(
+        `'${tagName}' tag must be inside a for loop, ` +
+        'but found no enclosing loop',
+        node.lineno,
+        node.colno);
+    }
+
+    if (loop.kind === 'asyncAll') {
+      this.fail(
+        `'${tagName}' tag is not supported inside asyncAll loops ` +
+        'because their iterations run in parallel and have no defined order; ' +
+        'use asyncEach instead',
+        node.lineno,
+        node.colno);
+    }
+
+    return loop;
+  }
+
+  compileBreak(node) {
+    const loop = this._validateLoopControl(node, 'break');
+
+    if (loop.kind === 'asyncEach') {
+      // In async loops the iterations are chained callbacks rather
+      // than a native loop. Signal the abort, then return: directly in
+      // the iterator this stops the iteration, and inside an
+      // asynchronous filter callback it skips the rest of the
+      // iteration body compiled into that callback. The per-iteration
+      // guard emitted at the top of each lifted callback stops
+      // fall-through from any enclosing callback.
+      this._emitLine(`${loop.guardId} = true;`);
+      this._emitLine(`${loop.breakId}();`);
+      this._emitLine('return;');
+    } else {
+      this._emitLine('break;');
+    }
+  }
+
+  compileContinue(node) {
+    const loop = this._validateLoopControl(node, 'continue');
+
+    if (loop.kind === 'asyncEach') {
+      // Mark the iteration as continued and advance to the next one.
+      // The return and the per-iteration guard checks in enclosing
+      // async wrappers skip the rest of the current iteration.
+      this._emitLine(`${loop.guardId} = true;`);
+      this._emitLine(`next(${loop.indexId});`);
+      this._emitLine('return;');
+    } else {
+      this._emitLine('continue;');
+    }
+  }
+
   compileFor(node, frame) {
     // Some of this code is ugly, but it keeps the generated code
     // as fast as possible. ForAsync also shares some of this, but
@@ -658,6 +804,8 @@ class Compiler extends Obj {
     frame = frame.push();
 
     this._emitLine('frame = frame.push();');
+
+    this._enterLoop('for', i);
 
     this._emit(`var ${arr} = `);
     this._compileExpression(node.arr, frame);
@@ -735,6 +883,11 @@ class Compiler extends Obj {
     }
 
     this._emitLine('}');
+
+    // The {% else %} body is emitted outside the native loop, so loop
+    // control tags are not valid there (matching jinja2); pop the loop
+    // before compiling it.
+    this._leaveLoop();
     if (node.else_) {
       this._emitLine('if (!' + len + ') {');
       this.compile(node.else_, frame);
@@ -753,6 +906,14 @@ class Compiler extends Obj {
     var len = this._tmpid();
     var arr = this._tmpid();
     var asyncMethod = parallel ? 'asyncAll' : 'asyncEach';
+    // breakId is the extra "abort" callback of asyncEach which ends
+    // the iteration immediately, brokeId records that the loop was
+    // broken so the {% else %} block is skipped, and guardId is a
+    // per-iteration flag used to implement break/continue from inside
+    // asynchronous callbacks.
+    var breakId = parallel ? null : this._tmpid();
+    var brokeId = parallel ? null : this._tmpid();
+    var guardId = parallel ? null : this._tmpid();
     frame = frame.push();
 
     this._emitLine('frame = frame.push();');
@@ -760,6 +921,13 @@ class Compiler extends Obj {
     this._emit('var ' + arr + ' = runtime.fromIterator(');
     this._compileExpression(node.arr, frame);
     this._emitLine(');');
+
+    if (!parallel) {
+      this._emitLine('var ' + brokeId + ' = false;');
+    }
+
+    this._enterLoop(parallel ? 'asyncAll' : 'asyncEach', i,
+      breakId, guardId);
 
     if (node.name instanceof nodes.Array) {
       const arrayLen = node.name.children.length;
@@ -769,7 +937,8 @@ class Compiler extends Obj {
         this._emit(`${name.value},`);
       });
 
-      this._emit(i + ',' + len + ',next) {');
+      this._emit(i + ',' + len + ',next' +
+        (parallel ? '' : ',' + breakId) + ') {');
 
       node.name.children.forEach((name) => {
         const id = name.value;
@@ -778,12 +947,17 @@ class Compiler extends Obj {
       });
     } else {
       const id = node.name.value;
-      this._emitLine(`runtime.${asyncMethod}(${arr}, 1, function(${id}, ${i}, ${len},next) {`);
+      this._emitLine(`runtime.${asyncMethod}(${arr}, 1, function(${id}, ${i}, ${len},next` +
+        (parallel ? '' : ',' + breakId) + ') {');
       this._emitLine('frame.set("' + id + '", ' + id + ');');
       frame.set(id, id);
     }
 
     this._emitLoopBindings(node, arr, i, len);
+
+    if (!parallel) {
+      this._emitLine('var ' + guardId + ' = false;');
+    }
 
     this._withScopedSyntax(() => {
       let buf;
@@ -800,17 +974,43 @@ class Compiler extends Obj {
     });
 
     const output = this._tmpid();
-    this._emitLine('}, ' + this._makeCallback(output));
+
+    // Start the final completion callback, which (through the scope
+    // closers) wraps all the code following the loop. For asyncEach,
+    // the iterator function is first closed and an abort callback
+    // (used by {% break %}) is passed before the completion callback:
+    // the runtime invokes it (as breakId) with the same completion
+    // callback as a normal finish, so the following code resumes in
+    // order either way. The broke flag skips the {% else %} block
+    // after a break.
+    if (!parallel) {
+      this._emit('}, function(' + breakId + ') {');
+      this._emitLine(brokeId + ' = true;');
+      this._emitLine(breakId + '();');
+      // Close the abort function ('}'), then start the completion
+      // callback. The scope closer '})' closes the completion
+      // callback and the runtime.asyncEach call.
+    }
+
+    this._emit('}, ');
+    this._emitLine(this._makeCallback(output));
     this._addScopeLevel();
+
+    // The {% else %} body runs after the iteration completes and is
+    // not part of it, so loop control tags are not valid there.
+    this._leaveLoop();
+    if (node.else_) {
+      if (parallel) {
+        this._emitLine('if (!' + arr + '.length) {');
+      } else {
+        this._emitLine('if (!' + brokeId + ' && !' + arr + '.length) {');
+      }
+      this.compile(node.else_, frame);
+      this._emitLine('}');
+    }
 
     if (parallel) {
       this._emitLine(this.buffer + ' += ' + output + ';');
-    }
-
-    if (node.else_) {
-      this._emitLine('if (!' + arr + '.length) {');
-      this.compile(node.else_, frame);
-      this._emitLine('}');
     }
 
     this._emitLine('frame = frame.pop();');
@@ -889,8 +1089,10 @@ class Compiler extends Obj {
 
     const bufferId = this._pushBuffer();
 
-    this._withScopedSyntax(() => {
-      this.compile(node.body, currFrame);
+    this._withFunctionBoundary(() => {
+      this._withScopedSyntax(() => {
+        this.compile(node.body, currFrame);
+      });
     });
 
     this._emitLine('frame = ' + ((keepFrame) ? 'frame.pop();' : 'callerFrame;'));
@@ -1082,8 +1284,10 @@ class Compiler extends Obj {
     this.buffer = 'output';
     this._emitLine('(function() {');
     this._emitLine('var output = "";');
-    this._withScopedSyntax(() => {
-      this.compile(node.body, frame);
+    this._withFunctionBoundary(() => {
+      this._withScopedSyntax(() => {
+        this.compile(node.body, frame);
+      });
     });
     this._emitLine('return output;');
     this._emitLine('})()');
@@ -1125,7 +1329,9 @@ class Compiler extends Obj {
 
     this._emitFuncBegin(node, 'root');
     this._emitLine('var parentTemplate = null;');
-    this._compileChildren(node, frame);
+    this._withFunctionBoundary(() => {
+      this._compileChildren(node, frame);
+    });
     this._emitLine('if(parentTemplate) {');
     this._emitLine('parentTemplate.rootRenderFunc(env, context, frame, runtime, cb);');
     this._emitLine('} else {');
@@ -1151,7 +1357,9 @@ class Compiler extends Obj {
 
       const tmpFrame = new Frame();
       this._emitLine('var frame = frame.push(true);');
-      this.compile(block.body, tmpFrame);
+      this._withFunctionBoundary(() => {
+        this.compile(block.body, tmpFrame);
+      });
       this._emitFuncEnd();
     });
 

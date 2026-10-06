@@ -86,6 +86,8 @@ const InlineIf = Node.extend('InlineIf', { fields: ['cond', 'body', 'else_'] });
 const For = Node.extend('For', { fields: ['arr', 'name', 'body', 'else_'] });
 const AsyncEach = For.extend('AsyncEach');
 const AsyncAll = For.extend('AsyncAll');
+const Break = Node.extend('Break', { fields: [] });
+const Continue = Node.extend('Continue', { fields: [] });
 const Macro = Node.extend('Macro', { fields: ['name', 'args', 'body'] });
 const Caller = Macro.extend('Caller');
 const Import = Node.extend('Import', { fields: ['template', 'target', 'withContext'] });
@@ -228,6 +230,8 @@ module.exports = {
   For: For,
   AsyncEach: AsyncEach,
   AsyncAll: AsyncAll,
+  Break: Break,
+  Continue: Continue,
   Macro: Macro,
   Caller: Caller,
   Import: Import,

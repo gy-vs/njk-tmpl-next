@@ -264,29 +264,41 @@ function handleError(error, lineno, colno) {
   }
 }
 
-function asyncEach(arr, dimen, iter, cb) {
+function asyncEach(arr, dimen, iter, breakIter, cb) {
+  // breakIter is an optional callback supporting {% break %}: it is
+  // invoked (with the final completion callback cb) when an iteration
+  // asks to abort, and it is responsible for skipping the remaining
+  // iterations.
+  const abort = () => {
+    if (breakIter) {
+      breakIter(cb);
+    } else {
+      cb();
+    }
+  };
+
   if (lib.isArray(arr)) {
     const len = arr.length;
 
     lib.asyncIter(arr, function iterCallback(item, i, next) {
       switch (dimen) {
         case 1:
-          iter(item, i, len, next);
+          iter(item, i, len, next, abort);
           break;
         case 2:
-          iter(item[0], item[1], i, len, next);
+          iter(item[0], item[1], i, len, next, abort);
           break;
         case 3:
-          iter(item[0], item[1], item[2], i, len, next);
+          iter(item[0], item[1], item[2], i, len, next, abort);
           break;
         default:
-          item.push(i, len, next);
+          item.push(i, len, next, abort);
           iter.apply(this, item);
       }
     }, cb);
   } else {
     lib.asyncFor(arr, function iterCallback(key, val, i, len, next) {
-      iter(key, val, i, len, next);
+      iter(key, val, i, len, next, abort);
     }, cb);
   }
 }

@@ -203,6 +203,20 @@ class Parser extends Obj {
     return node;
   }
 
+  parseBreak() {
+    const tag = this.peekToken();
+    this.skipSymbol('break');
+    this.advanceAfterBlockEnd('break');
+    return new nodes.Break(tag.lineno, tag.colno);
+  }
+
+  parseContinue() {
+    const tag = this.peekToken();
+    this.skipSymbol('continue');
+    this.advanceAfterBlockEnd('continue');
+    return new nodes.Continue(tag.lineno, tag.colno);
+  }
+
   parseMacro() {
     const macroTok = this.peekToken();
     if (!this.skipSymbol('macro')) {
@@ -617,6 +631,10 @@ class Parser extends Obj {
       case 'asyncEach':
       case 'asyncAll':
         return this.parseFor();
+      case 'break':
+        return this.parseBreak();
+      case 'continue':
+        return this.parseContinue();
       case 'block':
         return this.parseBlock();
       case 'extends':

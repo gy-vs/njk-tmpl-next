@@ -369,6 +369,28 @@
                 [nodes.TemplateData, 'empty']]]]]);
     });
 
+    it('should parse break and continue tags', function() {
+      isAST(parser.parse('{% for x in [1, 2] %}{% break %}{% endfor %}'),
+        [nodes.Root,
+          [nodes.For,
+            [nodes.Array,
+              [nodes.Literal, 1],
+              [nodes.Literal, 2]],
+            [nodes.Symbol, 'x'],
+            [nodes.NodeList,
+              [nodes.Break]]]]);
+
+      isAST(parser.parse('{% for x in [1, 2] %}{% continue %}{% endfor %}'),
+        [nodes.Root,
+          [nodes.For,
+            [nodes.Array,
+              [nodes.Literal, 1],
+              [nodes.Literal, 2]],
+            [nodes.Symbol, 'x'],
+            [nodes.NodeList,
+              [nodes.Continue]]]]);
+    });
+
     it('should parse filters', function() {
       isAST(parser.parse('{{ foo | bar }}'),
         [nodes.Root,
